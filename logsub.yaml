@@ -1,0 +1,165 @@
+
+Resources:
+
+  GeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub "/aws/lambda/${LogGeneratorFunction}"
+      RetentionInDays: 14
+      Tags: 
+        - Key: Project
+          Value: logsubexample      
+      
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      DisplayName: FailLogAlert
+      TopicName: FailLogAlert
+      Tags: 
+        - Key: Project
+          Value: logsubexample      
+          
+  Subscription1:
+    Type: AWS::SNS::Subscription
+    Properties: 
+      Endpoint: chris.hare@icloud.com
+      Protocol: email
+      TopicArn: !Ref SNSTopic
+          
+  LambdaExecutionRole:  
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Description: log example execution role
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: snsPublish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 'sns:publish'
+                Resource: !Ref SNSTopic
+      Tags: 
+        - Key: Project
+          Value: logsubexample      
+          
+  LogGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+        ZipFile : |
+          import random
+          random.seed()
+          def handler(event, context):
+            r = random.randint(0,1)
+            if r == 0:
+              print("OK")
+            else:
+              print("FAIL")
+      Description: Generate sample log data
+      FunctionName: generator
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Tags: 
+      - Key: Project
+        Value: logsubexample      
+        
+        
+  LogSubscriptionFunction:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+        ZipFile : |
+          import os
+          import gzip
+          import json
+          import base64
+          from datetime import datetime
+          import boto3
+          def handler(event, context):
+            
+              SNS_TOPIC = os.environ.get("SNS_TOPIC", None)
+              if SNS_TOPIC is None:
+                print("no SNS topic in environment.  Exit")
+                exit(1)
+              
+              print(event)
+              try:
+                  logData = str(
+                      gzip.decompress(base64.b64decode(
+                          event["awslogs"]["data"])), "utf-8"
+                  )
+              except Exception as error:
+                  logging.error("failed to retrieve message data: %s", error)
+                  return 500
+          
+              jsonBody = json.loads(logData)
+              print(jsonBody)
+          
+              print(f"Account: {jsonBody['owner']}")
+              print(f"Source LogGroup: {jsonBody['logGroup']}")
+              print(f"Source LogStream: {jsonBody['logStream']}")
+          
+              for filterData in jsonBody["subscriptionFilters"]:
+                  print(f"Subscription Filter: {filterData}")
+          
+              print(f"Message Type: {jsonBody['messageType']}")
+          
+              for logEvent in jsonBody["logEvents"]:
+                  print(f"logEvent = {logEvent}")
+                  print(f"event ID {logEvent['id']} at {datetime.fromtimestamp(logEvent['timestamp'] / 1000.0)}")
+          
+                  snd = logEvent.get('message','')
+                  if snd == '':
+                    exit(0)
+                  print(f"message is {snd}")
+                  
+                  sns_client = boto3.client('sns')
+                  response = sns_client.publish(
+                    TopicArn=SNS_TOPIC,
+                    Message=snd,
+                    Subject='FAIL detected',
+                    )
+                  print(f"sns response = {response}")
+          
+              exit(0)
+          
+      Description: Generate sample log data
+      FunctionName: analyzer
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Environment:
+        Variables:
+          SNS_TOPIC: !Ref SNSTopic
+      Tags: 
+        - Key: Project
+          Value: logsubexample      
+          
+  SubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    DependsOn: GeneratorLogGroup
+    Properties: 
+      DestinationArn: !GetAtt LogSubscriptionFunction.Arn
+      FilterPattern: "FAIL"
+      LogGroupName: !Sub "/aws/lambda/${LogGeneratorFunction}"
+      
+  InvokeSubscriptionFilter:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LogSubscriptionFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: logs.amazonaws.com
+      
+          
